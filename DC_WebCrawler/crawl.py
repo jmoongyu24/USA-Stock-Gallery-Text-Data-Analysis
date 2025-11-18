@@ -8,218 +8,294 @@ from bs4 import BeautifulSoup
 from time import sleep
 import pandas as pd
 from datetime import datetime
-from multiprocessing import Pool, Manager
+from multiprocessing import Pool
 
-# Chrome 옵션 설정
-chrome_options = Options()
-chrome_options.add_argument('--headless')
-chrome_options.add_argument('--log-level=3')
-chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+# 크롤링할 페이지 범위 설정
+start_page = 200
+end_page = 475
 
-driver = webdriver.Chrome(options=chrome_options)
-
-start_date = time.strptime("2025.11.13 00:00:00", "%Y.%m.%d %H:%M:%S")
-end_date = time.strptime("2025.11.13 00:01:00", "%Y.%m.%d %H:%M:%S")
-
-# 수집한 정보를 저장하는 리스트
-writer_list = [] # 작성자 아이디
-title_list = [] # 제목
-contents_list = [] # 게시글 내용
-contents_date_list = []
-gall_no_list = [] # 글 번호
-reply_id = [] # 댓글 아이디
-reply_content = [] # 댓글 내용
-reply_date = [] # 댓글 등록일
-
+# 전역 설정 변수
+START_DATE = time.strptime("2025.11.17 00:00:00", "%Y.%m.%d %H:%M:%S")
+END_DATE = time.strptime("2025.11.17 23:59:59", "%Y.%m.%d %H:%M:%S")
 BASE = "https://gall.dcinside.com/mgallery/board/lists"
 
-start_page = 1
-Flag = True
+def create_driver():
+    chrome_options = Options()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--log-level=3')
+    chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    
+    driver = webdriver.Chrome(options=chrome_options)
+    return driver
 
-while Flag:
-    # 게시글 목록 페이지
-    BASE_URL = BASE + "?id=stockus&page=" + str(start_page)
+def parse_article_date(date_element):
+    """게시글 날짜 파싱"""
+    if not date_element:
+        return None
+    
+    date_title = date_element.get('title')
+    
+    if date_title:  # title 속성이 있는 경우
+        date_str = date_title.replace('-', '.').replace(' ', ' ')
+        article_date = time.strptime(date_str, "%Y.%m.%d %H:%M:%S")
+        c_date = date_title[:19]
+        return article_date, c_date
+    else:  # title 속성이 없는 경우
+        date_text = date_element.text.strip()
+        if ':' in date_text:
+            hour, minute = date_text.split(':')
+            today = time.localtime()
+            date_str = f"{today.tm_year}.{today.tm_mon:02d}.{today.tm_mday:02d} {hour}:{minute}"
+            article_date = time.strptime(date_str, "%Y.%m.%d %H:%M")
+            c_date = date_str.replace('.', '-')
+            return article_date, c_date
+    return None
 
+def crawl_page(page_num):
+    """
+    단일 페이지 크롤링 함수 (각 프로세스가 독립적으로 실행)
+    """
+    print(f"프로세스 {os.getpid()}: 페이지 {page_num} 크롤링 시작")
+    driver = create_driver()
+    
+    # 각 프로세스의 수집 데이터
+    writer_list = []
+    title_list = []
+    contents_list = []
+    contents_date_list = []
+    gall_no_list = []
+    reply_id = []
+    reply_content = []
+    reply_date = []
+    
     try:
-        driver.get(BASE_URL)
-        sleep(1)
-    except:
-        # 예외 발생 시 다시 load
-        continue
-
-    # 게시글 목록의 HTML 소스 가져오기
-    page_source = driver.page_source
-    soup = BeautifulSoup(page_source, 'html.parser')
-
-    # 모든 게시글의 정보를 찾음
-    article_list = soup.find('tbody').find_all('tr')
-    
-    # 해당 페이지에 수집할 게시글이 있는지 확인
-    has_target_article = False
-    all_old = True
-    
-    for article in article_list:
-        date_element = article.find('td', class_='gall_date')
-        if not date_element:
-            continue
-            
-        # title 속성에서 정확한 날짜/시간 가져오기
-        date_title = date_element.get('title')
+        BASE_URL = BASE + "?id=stockus&page=" + str(page_num)
         
-        if date_title:  # title 속성이 있는 경우 (정확한 날짜/시간 정보)
-            # "2025-11-11 15:15:31" 형식을 "2025.11.11 15:15:31" 형식으로 변환
-            date_str = date_title.replace('-', '.').replace(' ', ' ')  # "2025.11.11 15:15:31"
-            article_date = time.strptime(date_str, "%Y.%m.%d %H:%M:%S")  # 형식에 %S 추가
-        else:  # title 속성이 없는 경우
-            date_text = date_element.text.strip()
-            if ':' in date_text:  # "HH:MM" 형식
-                hour, minute = date_text.split(':')
-                today = time.localtime()
-                date_str = f"{today.tm_year}.{today.tm_mon:02d}.{today.tm_mday:02d} {hour}:{minute}"
-                article_date = time.strptime(date_str, "%Y.%m.%d %H:%M")
-            else:  # "MM.DD" 형식
-                continue
-        
-        # 날짜 범위 확인
-        if start_date <= article_date <= end_date:
-            has_target_article = True
-            all_old = False
-        elif article_date < start_date:
-            all_old = True
-        else:
-            all_old = False
-    
-    # 모든 게시글이 수집 기간보다 이전이면 종료
-    if all_old and not has_target_article:
-        print(f"페이지 {start_page}: 수집 기간보다 이전 게시글만 존재. 크롤링 종료")
-        Flag = False
-        break
-    
-    # 수집 기간에 해당하는 게시글이 없으면 다음 페이지로
-    if not has_target_article:
-        print(f"페이지 {start_page}: 수집할 게시글 없음. 다음 페이지로 이동")
-        start_page += 1
-        continue
-
-    # 게시글 수집
-    for article in article_list:
         try:
-            # 날짜 확인
+            driver.get(BASE_URL)
+            sleep(1)
+        except:
+            print(f"페이지 {page_num} 로드 실패")
+            return None
+        
+        page_source = driver.page_source
+        soup = BeautifulSoup(page_source, 'html.parser')
+        
+        tbody = soup.find('tbody')
+        if not tbody:
+            print(f"페이지 {page_num}에서 tbody를 찾을 수 없습니다")
+            return None
+        
+        article_list = tbody.find_all('tr')
+        
+        # 수집할 게시글이 있는지 확인
+        has_target_article = False
+        for article in article_list:
             date_element = article.find('td', class_='gall_date')
             if not date_element:
                 continue
-                
-            date_title = date_element.get('title')
             
-            if date_title:
-                date_str = date_title.replace('-', '.').replace(' ', ' ')  # "2025.11.11 15:15:31"
-                article_date = time.strptime(date_str, "%Y.%m.%d %H:%M:%S")  # 형식에 %S 추가
-                c_date = date_title[:19]  # "2025-11-11 15:15:31" 형식 그대로 저장
-            else:
-                date_text = date_element.text.strip()
-                if ':' in date_text:
-                    hour, minute = date_text.split(':')
-                    today = time.localtime()
-                    date_str = f"{today.tm_year}.{today.tm_mon:02d}.{today.tm_mday:02d} {hour}:{minute}"
-                    article_date = time.strptime(date_str, "%Y.%m.%d %H:%M")
-                    c_date = date_str.replace('.', '-')
-                else:
-                    continue
-            
-            # 날짜 범위에 포함되지 않으면 건너뛰기
-            if not (start_date <= article_date <= end_date):
+            date_info = parse_article_date(date_element)
+            if not date_info:
                 continue
             
-            #게시글의 제목을 가져오는 부분
-            title = article.find('a').text
-            
-            #게시글의 종류(ex-일반/설문/투표/공지/등등...)
-            head = article.find('td',{"class": "gall_subject"}).text
-            
-            if head not in ['설문','AD','공지']: #사용자들이 쓴 글이 목적이므로 광고/설문/공지 제외
-                    
-                #게시글 번호 찾아오기
-                gall_id = article.find("td",{"class" : "gall_num"}).text
-                
-                if gall_id in writer_list:
+            article_date, _ = date_info
+            if START_DATE <= article_date <= END_DATE:
+                has_target_article = True
+                break
+        
+        if not has_target_article:
+            print(f"페이지 {page_num}: 수집할 게시글 없음")
+            return None
+        
+        # 게시글 수집
+        for article in article_list:
+            try:
+                # 날짜 확인
+                date_element = article.find('td', class_='gall_date')
+                if not date_element:
                     continue
                 
-                #각 게시글의 주소를 찾기
-                tag = article.find('a',href = True)
-                content_url = "https://gall.dcinside.com" + tag['href']
-                
-                #게시글 load
-                try:
-                    driver.get(content_url)
-                    sleep(1)
-                    contents_soup = BeautifulSoup(driver.page_source,"html.parser")
-                    
-                    write_div = contents_soup.find('div', {"class": "write_div"})
-                    if write_div:
-                        contents = write_div.text.strip()
-                    else:
-                        contents = ""
-                except Exception as e:
-                    print(f"게시글 로드 실패: {gall_id}")
+                date_info = parse_article_date(date_element)
+                if not date_info:
                     continue
                 
-                #게시글 제목과 내용을 수집
-                writer_list.append(gall_id)
-                title_list.append(title)
-                contents_list.append(contents)
-                contents_date_list.append(c_date)
+                article_date, c_date = date_info
                 
-                print(f"수집 완료 - 번호: {gall_id} | 제목: {title[:20]}... | 날짜: {c_date}")
-
+                # 날짜 범위에 포함되지 않으면 건너뛰기
+                if not (START_DATE <= article_date <= END_DATE):
+                    continue
                 
-                #댓글의 갯수를 파악
-                reply_no = contents_soup.find_all("li",{"class" : "ub-content"})
-                if len(reply_no) > 0 :
-                    for r in reply_no:
-                        try:
-                            user_name = r.find("em").text #답글 아이디 추출
-                            user_reply_date = r.find("span",{"class" : "date_time"}).text #답글 등록 날짜 추출
-                            user_reply = r.find("p",{"class" : "usertxt ub-word"}).text #답글 내용 추출
-                            
-                            #댓글의 내용을 저장
-                            gall_no_list.append(gall_id)
-                            reply_id.append(user_name)
-                            reply_date.append(user_reply_date)
-                            reply_content.append(user_reply)
-
-                        except: #댓글에 디시콘만 올려놓은 경우
-                            continue
+                # 게시글 제목
+                title_tag = article.find('a')
+                if not title_tag:
+                    continue
+                title = title_tag.text
                 
-        except Exception as e:
-            print(f"게시글 처리 중 오류: {str(e)}")
-            continue
+                # 게시글 종류
+                head_tag = article.find('td', {"class": "gall_subject"})
+                if not head_tag:
+                    continue
+                head = head_tag.text
+                
+                if head not in ['설문', 'AD', '공지']:
+                    # 게시글 번호
+                    gall_num_tag = article.find("td", {"class": "gall_num"})
+                    if not gall_num_tag:
+                        continue
+                    gall_id = gall_num_tag.text
+                    
+                    # 게시글 주소
+                    tag = article.find('a', href=True)
+                    if not tag:
+                        continue
+                    content_url = "https://gall.dcinside.com" + tag['href']
+                    
+                    # 게시글 내용 수집
+                    try:
+                        driver.get(content_url)
+                        sleep(1)
+                        contents_soup = BeautifulSoup(driver.page_source, "html.parser")
+                        
+                        write_div = contents_soup.find('div', {"class": "write_div"})
+                        contents = write_div.text.strip() if write_div else ""
+                    except Exception as e:
+                        print(f"페이지 {page_num} - 게시글 {gall_id} 로드 실패")
+                        continue
+                    
+                    # 게시글 정보 저장
+                    writer_list.append(gall_id)
+                    title_list.append(title)
+                    contents_list.append(contents)
+                    contents_date_list.append(c_date)
+                    
+                    print(f"페이지 {page_num} - 수집: {gall_id} | {title[:20]}... | {c_date}")
+                    
+                    # 댓글 수집
+                    reply_no = contents_soup.find_all("li", {"class": "ub-content"})
+                    if len(reply_no) > 0:
+                        for r in reply_no:
+                            try:
+                                user_name_tag = r.find("em")
+                                user_name = user_name_tag.text if user_name_tag else ""
+                                
+                                user_reply_date_tag = r.find("span", {"class": "date_time"})
+                                user_reply_date = user_reply_date_tag.text if user_reply_date_tag else ""
+                                
+                                user_reply_tag = r.find("p", {"class": "usertxt ub-word"})
+                                user_reply = user_reply_tag.text if user_reply_tag else ""
+                                
+                                gall_no_list.append(gall_id)
+                                reply_id.append(user_name)
+                                reply_date.append(user_reply_date)
+                                reply_content.append(user_reply)
+                            except:
+                                continue
             
-    #다음 게시글 목록 페이지로 넘어가기
-    start_page += 1
-    print(f"다음 페이지({start_page})로 이동")
+            except Exception as e:
+                print(f"페이지 {page_num} - 게시글 처리 중 오류: {str(e)}")
+                continue
+    
+    finally:
+        driver.quit()
+    
+    print(f"프로세스 {os.getpid()}: 페이지 {page_num} 완료 (게시글 {len(writer_list)}개, 댓글 {len(reply_content)}개)")
+    
+    return {
+        'contents': {
+            'id': writer_list,
+            'title': title_list,
+            'content': contents_list,
+            'date': contents_date_list
+        },
+        'replies': {
+            'id': gall_no_list,
+            'reply_id': reply_id,
+            'reply_content': reply_content,
+            'date': reply_date
+        }
+    }
 
-# 브라우저 종료
-driver.quit()
+def main():
+    """
+    메인 함수: multiprocessing을 사용하여 여러 페이지를 병렬로 크롤링
+    """
+    # 사용할 프로세스 수)
+    num_processes = 8
+    print(f"\n{'='*60}")
+    print(f"Multiprocessing 크롤링 시작")
+    print(f"{'='*60}")
+    print(f"프로세스 수: {num_processes}개")
+    print(f"페이지 범위: {start_page} ~ {end_page}")
+    print(f"수집 기간: {time.strftime('%Y.%m.%d %H:%M:%S', START_DATE)} ~ {time.strftime('%Y.%m.%d %H:%M:%S', END_DATE)}")
+    print(f"{'='*60}\n")
+    
+    # 페이지 번호 리스트 생성
+    page_numbers = list(range(start_page, end_page + 1))
+    
+    # multiprocessing Pool을 사용하여 병렬 크롤링
+    with Pool(processes=num_processes) as pool:
+        results = pool.map(crawl_page, page_numbers)
+    
+    # None이 아닌 결과만 필터링
+    results = [r for r in results if r is not None]
+    
+    # 모든 프로세스의 결과를 병합
+    all_contents = {
+        'id': [],
+        'title': [],
+        'content': [],
+        'date': []
+    }
+    
+    all_replies = {
+        'id': [],
+        'reply_id': [],
+        'reply_content': [],
+        'date': []
+    }
+    
+    for result in results:
+        all_contents['id'].extend(result['contents']['id'])
+        all_contents['title'].extend(result['contents']['title'])
+        all_contents['content'].extend(result['contents']['content'])
+        all_contents['date'].extend(result['contents']['date'])
+        
+        all_replies['id'].extend(result['replies']['id'])
+        all_replies['reply_id'].extend(result['replies']['reply_id'])
+        all_replies['reply_content'].extend(result['replies']['reply_content'])
+        all_replies['date'].extend(result['replies']['date'])
+    
+    # DataFrame 생성
+    contents_df = pd.DataFrame(all_contents)
+    reply_df = pd.DataFrame(all_replies)
+    
+    # 기존 파일이 있으면 불러와서 합치기
+    if os.path.exists("contents.csv"):
+        existing_contents = pd.read_csv("contents.csv", encoding='utf8')
+        contents_df = pd.concat([existing_contents, contents_df], ignore_index=True)
+    
+    if os.path.exists("reply.csv"):
+        existing_reply = pd.read_csv("reply.csv", encoding='utf8')
+        reply_df = pd.concat([existing_reply, reply_df], ignore_index=True)
+    
+    # 게시글, 댓글 중복 제거
+    contents_df = contents_df.drop_duplicates(subset=['id', 'title', 'content', 'date'], keep='last')
+    reply_df = reply_df.drop_duplicates(subset=['id', 'reply_id', 'reply_content', 'date'], keep='last')
 
-#수집한 데이터를 저장
-print(f"\n총 {len(writer_list)}개의 게시글과 {len(reply_id)}개의 댓글을 수집했습니다.")
+    os.makedirs('./data', exist_ok=True)
 
-contents_df = pd.DataFrame({"id" : writer_list, "title" : title_list, "content" : contents_list, "date" : contents_date_list})
-reply_df = pd.DataFrame({"id" : gall_no_list, "reply_id" : reply_id, "reply_content" : reply_content, "date" : reply_date})
+    # CSV 저장
+    contents_df.to_csv("./data/contents.csv", encoding='utf8', index=False)
+    reply_df.to_csv("./data/reply.csv", encoding='utf8', index=False)
+    
+    print(f"\n{'='*60}")
+    print("크롤링 완료!")
+    print(f"{'='*60}")
+    print(f"총 게시글 수: {len(contents_df)}개")
+    print(f"총 댓글 수: {len(reply_df)}개")
+    print(f"저장 파일: contents.csv, reply.csv")
+    print(f"{'='*60}\n")
 
-# 기존 파일이 있으면 불러와서 합치기
-if os.path.exists("contents.csv"):
-    existing_contents = pd.read_csv("contents.csv", encoding='utf8')
-    contents_df = pd.concat([existing_contents, contents_df], ignore_index=True)
-
-if os.path.exists("reply.csv"):
-    existing_reply = pd.read_csv("reply.csv", encoding='utf8')
-    reply_df = pd.concat([existing_reply, reply_df], ignore_index=True)
-
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-contents_df.to_csv("contents.csv", encoding='utf8', index=False)
-reply_df.to_csv("reply.csv", encoding='utf8', index=False)
-
-print("크롤링이 완료되었습니다!")
-print(f"게시글: contents.csv ({len(contents_df)}개)")
-print(f"댓글: reply.csv ({len(reply_df)}개)")
+if __name__ == '__main__':
+    main()
